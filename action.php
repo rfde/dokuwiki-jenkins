@@ -14,16 +14,16 @@ class action_plugin_jenkins extends DokuWiki_Action_Plugin {
     }
 
     /**
-   * Inserts a toolbar button
-   */
+     * Inserts a toolbar button
+     */
     function insert_button(&$event, $param) {
         $event->data[] = array (
             'type' => 'format',
             'title' => $this->getLang('button'),
             'icon' => '../../plugins/jenkins/images/button.png',
-            'open' => '<jenkins job="JOB_NAME"',
+            'open' => '<jenkins job="JOB_NAME" build="BUILD_NO" artifacts="list_preview"',
             'close' => ' />',
         );
-  }
+    }
 
 }

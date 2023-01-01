@@ -30,39 +30,17 @@ class syntax_plugin_jenkins extends DokuWiki_Syntax_Plugin {
         $this->Lexer->addSpecialPattern('<jenkins[^>]*/>', $mode, 'plugin_jenkins');
     }
 
-    function getURLProtocol($url) {
-        if (strpos($url, 'https') !== false) {
-            $url_protocol = array(
-                'protocol' => 'https',
-                'url' => str_replace('https://', '', $url)
-            );
-            return $url_protocol;
-        } elseif (strpos($url, 'http') !== false) {
-            $url_protocol = array(
-                'protocol' => 'http',
-                'url' => str_replace('http://', '', $url)
-            );
-            return $url_protocol;
-        } else {
-            return array('state'=>$state, 'bytepos_end' => $pos + strlen($match));
-        }
-    }
-
     // Dokuwiki Handler
     function handle($match, $state, $pos, Doku_Handler $handler) {
         switch($state){
             case DOKU_LEXER_SPECIAL :
                 $data = array(
-                        'state'=>$state,
-                        'build'=>false,
+                    'state' => $state,
+                    'job' => null,
+                    'build' => null,
+                    'artifacts' => false,
+                    'artifacts_preview' => false,
                 );
-
-                // Jenkins Configuration 
-                $jenkins_data = $this->getURLProtocol($this->getConf('jenkins.url'));
-                $data['url'] = $jenkins_data['url'];
-                $data['protocol'] = $jenkins_data['protocol'];
-                $data['user'] = $this->getConf('jenkins.user');
-                $data['token'] = $this->getConf('jenkins.token');
 
                 // Jenkins Job
                 preg_match("/job *= *(['\"])(.*?)\\1/", $match, $job);
@@ -70,10 +48,26 @@ class syntax_plugin_jenkins extends DokuWiki_Syntax_Plugin {
                     $data['job'] = $job[2];
                 }
                 // Jenkins Build
-                preg_match("/build *= *(['\"])(\\d+)\\1/", $match, $build_nb);
-                if ((count($build_nb) != 0) && ($build_nb[2] != 0)) {
-                    $data['build_nb'] = $build_nb[2];
-                    $data['build'] = true;
+                preg_match("/build *= *(['\"])(\\d+|last)\\1/", $match, $build_nb);
+                if (count($build_nb) !== 0) {
+                    $data['build'] = $build_nb[2];
+                   
+                    // List Artifacts?
+                    preg_match("/artifacts *= *(['\"])(list|list_preview)\\1/", $match, $artifacts);
+                    if (count($artifacts) != 0) {
+                        $data['artifacts'] = true;
+                        
+                        // Render artifact previews for images?
+                        switch ($artifacts[2]) {
+                            case 'list_preview':
+                                $data['artifacts_preview'] = true;
+                                break;
+                            case 'list':
+                            default:
+                                $data['artifacts_preview'] = false;
+                                break;
+                        }
+                    }
                 }
 
                 return $data;
@@ -102,92 +96,153 @@ class syntax_plugin_jenkins extends DokuWiki_Syntax_Plugin {
     }
 
     function rendererJenkins($renderer, $data) {
-        // Get Jenkins data
-        $jenkins = new DokuwikiJenkins($data);
-        $url = $jenkins->getJobURLRequest($data['job']);
-        if (isset($data['build_nb'])) {
-            $url = $url . '/' . $data['build_nb'];
+        $preview_formats = array('.png', '.jpg', '.gif', '.svg');
+
+        if ($data['job'] === null) {
+            $this->renderErrorRequest($renderer, $this->getLang('jenkins.error.no_job'));
+            return;
         }
-        $build = $data['build'];
-        $request = $jenkins->request($url, $build);
-        $weather_icon = $jenkins->getWeatherImg($jenkins->getJobURLRequest($data['job']));
+        if ($data['build'] === null) {
+            $this->renderErrorRequest($renderer, $this->getLang('jenkins.error.no_build'));
+            return;
+        }
+        
+        // Create jenkins API client
+        $jenkins = new DokuwikiJenkins(
+            $this->getConf('jenkins.url'),
+            $this->getConf('jenkins.user'),
+            $this->getConf('jenkins.token')
+        );
+        
+        // Send request
+        $build = $jenkins->requestBuild($data['job'], $data['build']);
+        if ($build === null) {
+            $this->renderErrorRequest($renderer, $this->getLang('jenkins.error.req_failed'));
+            return;
+        }
 
-        if ($request == '') {
-            $this->renderErrorRequest($renderer, $data);
-        } else {
-            // Manage data
-            $img = $this->getBuildIcon($request['result']);
-            $duration = $this->getDurationFromMilliseconds($request['duration']);
-            $short_desc = $request['actions'][0]['causes'][0]['shortDescription'];
+        // RENDERER
+        // outer wrapper div
+        $renderer->doc .= '<div class="jenkins-wrapper">';
 
-            // RENDERER
-            $renderer->doc .= '<div>';
-            // Jenkins logo
-            $renderer->doc .= '<span><img src="lib/plugins/jenkins/images/jenkins.png" class="jenkinslogo"></span> ';
-            // Build span
-            $renderer->doc .= '<span class="jenkins">';
-            // Weather
-            $renderer->doc .= '<img src="lib/plugins/jenkins/images/'.$weather_icon.'" class="jenkins">';
-            // Url and Job name
-            $renderer->doc .= '<a href="'.$request['url'].'" class="jenkins" target="_blank"> '.$request['fullDisplayName'].'</a> ';
-            $renderer->doc .= '<img src="lib/plugins/jenkins/images/'.$img.'" class="jenkins" title="'.$request['result'].'">';
+        // === HEADER ===
+        $renderer->doc .= '<div class="jenkins-head">';
+        // header / status icon
+        $build_icon = $this->getBuildIcon($build->result);
+        if ($build_icon !== null) {
+            $renderer->doc .= '<span class="jenkins-icon">';
+            $renderer->doc .= '<img class="jenkins-icon" '
+                . 'src="/dokuwiki/lib/plugins/jenkins/images/'. $build_icon . '" '
+                . 'title="' . $build->result . '" alt="' . $build->result . '" />';
             $renderer->doc .= '</span>';
-            // Job Details
-            $renderer->doc .= '<p>';
-            $renderer->doc .= '<span> <b>'.$this->getLang('jenkins.duration').':</b> '.$duration.'</span>';
-            $renderer->doc .= '<span> <b>'.$this->getLang('jenkins.msg').'</b> ';
-            if ($short_desc != '')
-                $renderer->doc .= $short_desc.'</span>';
-            else
-                $renderer->doc .= $this->getLang('jenkins.nodesc').'</span>';
-            $renderer->doc .= '</p></div>';
         }
+        // header / job & build name
+        $renderer->doc .= '<a href="' . $build->url . '">';
+        $renderer->doc .= '<strong>' . $build->display_name . '</strong>';
+        if ($data['build'] === 'last') {
+            $renderer->doc .= ' (latest build)';
+        }
+        $renderer->doc .= '</a>';
+        // header / jenkins logo
+        $renderer->doc .= '<span class="jenkins-head-right">';
+        $renderer->doc .= '<img class="jenkins-icon" src="/dokuwiki/lib/plugins/jenkins/images/jenkins.svg" alt="Jenkins Logo" />';
+        $renderer->doc .= '</span>';
+        // close header
+        $renderer->doc .= '</div>';
+
+        $renderer->doc .= '<hr />';
+
+        // === JOB DETAILS ===
+        // timestamp & duration
+        $renderer->doc .= '<p>';
+        $renderer->doc .= '<strong>' . $this->getLang('jenkins.timestamp') . ':</strong> ';
+        $renderer->doc .= dformat(intdiv($build->timestamp, 1000));
+        $renderer->doc .= ' <strong>' . $this->getLang('jenkins.duration') . ':</strong> ';
+        $renderer->doc .= $build->durationPretty();
+        $renderer->doc .= '</p>';
+
+        // description
+        if ($build->description !== null) {
+            $renderer->doc .= '<p><strong>' . $this->getLang('jenkins.description') . ':</strong><br/>';
+            $renderer->doc .= htmlentities($build->description);
+            $renderer->doc .= '</p>';
+        }
+
+        // git references
+        if (count($build->code_refs) > 0) {
+            $renderer->doc .= '<p style="margin-bottom:0"><strong>' . $this->getLang('jenkins.code_refs') . ':</strong></p>';
+            $renderer->doc .= '<ul>';
+            foreach ($build->code_refs as &$code_ref) {
+                $renderer->doc .= '<li><div class="li">';
+                $renderer->doc .= '<a href="' . $code_ref['url'] . '">';
+                $renderer->doc .= $code_ref['url'];
+                $renderer->doc .= '</a>';
+                $renderer->doc .= ', branch <code>' . $code_ref['branch'] . '</code>';
+                $renderer->doc .= ', commit <code>' . substr($code_ref['commit'], 0, 8) . '</code>';
+                $renderer->doc .= '</div></li>';
+            }
+            $renderer->doc .= '</ul>';
+        }
+
+        // === ARTIFACTS ===
+        if (($data['artifacts'] === true) && (count($build->artifacts) > 0)) {
+            $renderer->doc .= '<hr />';
+            $renderer->doc .= '<p style="margin-bottom:0">';
+            $renderer->doc .= '<strong>' . $this->getLang('jenkins.artifacts') . '</strong> (';
+            $renderer->doc .= '<a href="' . $build->artifactsZipUrl() . '">zip</a>';
+            $renderer->doc .= '):';
+            $renderer->doc .= '</p>';
+            $renderer->doc .= '<ul>';
+            foreach ($build->artifacts as &$artifact) {
+                $renderer->doc .= '<li><div class="li">';
+                $renderer->doc .= '<a href="' . $artifact['url'] . '">' . $artifact['filename'] . '</a>';
+                // TODO: Figure out how to set cross-origin headers to make this possible
+                // if (
+                //     ($data['artifacts_preview'] === true)
+                //     && (in_array(strtolower(substr($artifact['filename'], -4)), $preview_formats))
+                // ) {
+                //     $renderer->doc .= '<br />';
+                //     $renderer->doc .= '<a href="' . $artifact['url'] . '">';
+                //     $renderer->doc .= '<img class="jenkins-artifact-preview jenkins-artifact-preview-scaled" alt="Artifact Preview" src="' . $artifact['url'] . '" />';
+                //     $renderer->doc .= '</a>';
+                // }
+            }
+            $renderer->doc .= '</div></li>';
+        }
+
+        // close outer div
+        $renderer->doc .= '</div>'; // jenkins-wrapper
     }
 
-    function renderErrorRequest($renderer, $data) {
-        $renderer->doc .= '<div><p>';
-        $renderer->doc .= '<span><img src="lib/plugins/jenkins/images/jenkins.png" class="jenkinslogo"></span> ';
-        $renderer->doc .= '<span class="jenkinsfailed">';
-        $renderer->doc .= sprintf($this->getLang('jenkins.error'), $data['job']);
-        $renderer->doc .= '</span></p>';
+    function renderErrorRequest($renderer, $error_msg) {
+        // outer wrapper div
+        $renderer->doc .= '<div class="jenkins-wrapper">';
+        $renderer->doc .= '<div class="jenkins-head">';
+        // header / job & build name
+        $renderer->doc .= '<strong>Error</strong>';
+        // header / jenkins logo
+        $renderer->doc .= '<span class="jenkins-head-right">';
+        $renderer->doc .= '<img class="jenkins-icon" src="/dokuwiki/lib/plugins/jenkins/images/jenkins.svg" alt="Jenkins Logo" />';
+        $renderer->doc .= '</span>';
         $renderer->doc .= '</div>';
+        $renderer->doc .= '<p>';
+        $renderer->doc .= $this->getLang('jenkins.error') . " " . $error_msg;
+        $renderer->doc .= '</p>';
+        // close header
+        // close outer div
+        $renderer->doc .= '</div>'; // jenkins-wrapper
     }
 
     function getBuildIcon($result) {
-        $icons = Array(
-            'SUCCESS' => 'success.svg',
-            'ABORTED' => 'aborted.svg',
-            'FAILURE' => 'failed.svg'
-        );
-
-        return $icons[$result];
+        switch($result) {
+            case 'SUCCESS':
+                return 'success.svg';
+            case 'ABORTED':
+                return 'aborted.svg';
+            case 'FAILURE':
+                return 'failed.svg';
+            default:
+                return null;
+        }
     }
-
-    function getDurationFromMilliseconds($ms) {
-        $x = $ms / 1000;
-        $seconds = $x % 60;
-        $x /= 60;
-        $minutes = $x % 60;
-        $x /= 60;
-        $hours = $x % 24;
-        $x /= 24;
-        $days = $x;
-
-        $duration = '';
-        if ($days >= 1) {
-            $duration .= $days.'d ';
-        }
-        if ($hours >= 1) {
-            $duration .= $hours.'h ';
-        }
-        if ($minutes >= 1) {
-            $duration .= $minutes.'m ';
-        }
-        if ($seconds >= 1) {
-            $duration .= $seconds.'s ';
-        }
-
-        return $duration;
-    }
-
 }

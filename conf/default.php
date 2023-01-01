@@ -3,6 +3,6 @@
  * Options for jenkins plugin
  */
 
-$conf['jenkins.url']   = 'http://jenkins.com';
+$conf['jenkins.url']   = '';
 $conf['jenkins.user']  = '';
 $conf['jenkins.token'] = '';
